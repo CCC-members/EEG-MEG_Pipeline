@@ -1,0 +1,337 @@
+function [sMri, CortexLow,WhiteLow, MidLow] = my_import_anatomy_civet( CivetDir, nVertices, isInteractive, sFid, isExtraMaps)
+% IMPORT_ANATOMY_CIVET: Import a full CIVET folder as the subject's anatomy.
+%
+% USAGE:  errorMsg = import_anatomy_civet(iSubject, CivetDir=[], nVertices=15000, isInteractive=1, sFid=[], isExtraMaps=0)
+%
+% INPUT:
+%    - iSubject     : Indice of the subject where to import the MRI
+%                     If iSubject=0 : import MRI in default subject
+%    - CivetDir     : Full filename of the CIVET folder to import
+%    - nVertices    : Number of vertices in the file cortex surface
+%    - isInteractive: If 0, no input or user interaction
+%    - sFid         : Structure with the fiducials coordinates
+%    - isExtraMaps  : If 1, create an extra folder "CIVET" to save some of the
+%                     CIVET cortical maps (thickness, ...)
+% OUTPUT:
+%    - errorMsg : String: error message if an error occurs
+
+
+
+%% ===== PARSE INPUTS =====
+% Extrac cortical maps
+if (nargin < 5) || isempty(isExtraMaps)
+    isExtraMaps = 0;
+end
+% Fiducials
+if (nargin < 4) || isempty(sFid)
+    sFid = [];
+end
+% Interactive / silent
+if (nargin < 3) || isempty(isInteractive)
+    isInteractive = 0;
+end
+% Ask number of vertices for the cortex surface
+if (nargin < 2) || isempty(nVertices)
+    nVertices = [];
+end
+% Initialize returned variable
+errorMsg = [];
+% Ask folder to the user
+if (nargin < 1) || isempty(CivetDir)
+    % Get default import directory and formats
+    LastUsedDirs = bst_get('LastUsedDirs');
+    % Open file selection dialog
+    CivetDir = java_getfile( 'open', ...
+        'Import CIVET folder...', ...     % Window title
+        bst_fileparts(LastUsedDirs.ImportAnat, 1), ...           % Last used directory
+        'single', 'dirs', ...                  % Selection mode
+        {{'.folder'}, 'CIVET folder', 'CivetDir'}, 0);
+    % If no folder was selected: exit
+    if isempty(CivetDir)
+        return
+    end
+    % Save default import directory
+    LastUsedDirs.ImportAnat = CivetDir;
+    bst_set('LastUsedDirs', LastUsedDirs);
+end
+% Unload everything
+bst_memory('UnloadAll', 'Forced');
+
+
+
+
+%% ===== ASK NB VERTICES =====
+if isempty(nVertices)
+    nVertices = java_dialog('input', 'Number of vertices on the cortex surface:', 'Import CIVET folder', [], '15000');
+    if isempty(nVertices)
+        return
+    end
+    nVertices = str2double(nVertices);
+end
+% Number for each hemisphere
+nVertHemi = round(nVertices / 2);
+
+
+%% ===== PARSE CIVET FOLDER =====
+
+% Find MRI
+MriFile = file_find(sprintf('%s/native',CivetDir), '*_t1.mnc');
+if isempty(MriFile)
+    errorMsg = [errorMsg 'native MRI file was not found: *_t1.mnc' 10];
+    if isInteractive
+        bst_error(['Could not import CIVET folder: ' 10 10 errorMsg], 'Import CIVET folder', 0);        
+    end
+    return;
+elseif iscell(MriFile)
+    MriFile = MriFile{1};
+end
+% Get study prefix
+[tmp, StudyPrefix] = bst_fileparts(MriFile);
+StudyPrefix = strrep(StudyPrefix, '_t1', '');
+% Find surfaces
+TessLhFile = file_find(CivetDir, [StudyPrefix '_gray_surface_left_*.obj']);
+TessRhFile = file_find(CivetDir, [StudyPrefix '_gray_surface_right_*.obj']);
+TessLwFile = file_find(CivetDir, [StudyPrefix '_white_surface_left_*.obj']);
+TessRwFile = file_find(CivetDir, [StudyPrefix '_white_surface_right_*.obj']);
+TessLmFile = file_find(CivetDir, [StudyPrefix '_mid_surface_left_*.obj']);
+TessRmFile = file_find(CivetDir, [StudyPrefix '_mid_surface_right_*.obj']);
+if isempty(TessLmFile)
+    errorMsg = [errorMsg 'Surface file was not found: ' StudyPrefix '_mid_surface_left_*.obj' 10];
+end
+if isempty(TessRmFile)
+    errorMsg = [errorMsg 'Surface file was not found: ' StudyPrefix '_mid_surface_right_*.obj' 10];
+end
+% Find thickness maps
+if isExtraMaps
+    ThickLhFile = file_find(CivetDir, [StudyPrefix '_native_rms_tlink_30mm_left.txt']);
+    ThickRhFile = file_find(CivetDir, [StudyPrefix '_native_rms_tlink_30mm_right.txt']);
+end
+% Find fiducials definitions
+FidFile = file_find(CivetDir, 'fiducials.m');
+% Report errors
+if ~isempty(errorMsg)
+    if isInteractive
+        bst_error(['Could not import CIVET folder: ' 10 10 errorMsg], 'Import CIVET folder', 0);        
+    end
+    return;
+end
+
+sMri = in_mri(MriFile, 'ALL', 0);
+
+cubeSize = (size(sMri.Cube) - 1) .* sMri.Voxsize;
+
+
+%% ===== DEFINE FIDUCIALS =====
+% If fiducials file exist: read it
+isComputeMni = 1;
+if ~isempty(FidFile)
+    % Execute script
+    fid = fopen(FidFile, 'rt');
+    FidScript = fread(fid, [1 Inf], '*char');
+    fclose(fid);
+    % Execute script
+    eval(FidScript);    
+    % If not all the fiducials were loaded: ignore the file
+    if ~exist('NAS', 'var') || ~exist('LPA', 'var') || ~exist('RPA', 'var') || isempty(NAS) || isempty(LPA) || isempty(RPA)
+        FidFile = [];
+    end
+    % If the normalized points were not defined: too bad...
+    if ~exist('AC', 'var')
+        AC = [];
+    end
+    if ~exist('PC', 'var')
+        PC = [];
+    end
+    if ~exist('IH', 'var')
+        IH = [];
+    end
+    % NOTE THAT THIS FIDUCIALS FILE CAN CONTAIN A LINE: "isComputeMni = 1;"
+end
+% Random or predefined points
+if ~isInteractive || ~isempty(FidFile)
+    % Use fiducials from file
+    if ~isempty(FidFile)
+        % Already loaded
+    % Compute them from MNI transformation
+    elseif isempty(sFid)
+%         NAS = [cubeSize(1)./2,  cubeSize(2),           cubeSize(3)./2];
+%         LPA = [1,               cubeSize(2)./2,        cubeSize(3)./2];
+%         RPA = [cubeSize(1),     cubeSize(2)./2,        cubeSize(3)./2];
+%         AC  = [cubeSize(1)./2,  cubeSize(2)./2 + 20,   cubeSize(3)./2];
+%         PC  = [cubeSize(1)./2,  cubeSize(2)./2 - 20,   cubeSize(3)./2];
+%         IH  = [cubeSize(1)./2,  cubeSize(2)./2,        cubeSize(3)./2 + 50];
+        NAS = [];
+        LPA = [];
+        RPA = [];
+        AC  = [];
+        PC  = [];
+        IH  = [];
+        isComputeMni = 1;
+        warning('BST> Import anatomy: Anatomical fiducials were not defined, using standard MNI positions for NAS/LPA/RPA.');
+    % Else: use the defined ones
+    else
+        NAS = sFid.NAS;
+        LPA = sFid.LPA;
+        RPA = sFid.RPA;
+        AC = sFid.AC;
+        PC = sFid.PC;
+        IH = sFid.IH;
+    end
+   
+    % If the NAS/LPA/RPA are defined, but not the others: Compute them
+    if ~isempty(NAS) && ~isempty(LPA) && ~isempty(RPA) && isempty(AC) && isempty(PC) && isempty(IH)
+        isComputeMni = 1;
+    end
+% Define with the MRI Viewer
+else
+    % Resample volume if needed
+    if any(abs(sMri.Voxsize - [1 1 1]) > 0.001)
+        [sMriRes, Tres] = mri_resample(sMri, [256 256 256], [1 1 1]);
+    else
+        sMriRes = sMri;
+        Tres = [];
+    end
+    %% ===== ESTIMATE MNI TRANSFORMATION =====
+    % Compute affine transformation to MNI space
+    try
+        Tmni = mri_register_maff(sMriRes);
+        % Transf = mri_register_ls(sMri);
+    catch
+        errMsg = ['mri_register_maff: ' lasterr()];
+        sMri = [];
+        return;
+    end
+    % Append the resampling transformation matrix
+    if ~isempty(Tres)
+        Tmni = Tmni * Tres;
+    end
+
+
+    %% ===== SAVE RESULTS =====
+    bst_progress('start', 'Normalize anatomy', 'Saving results...');
+    % Save results into the MRI structure
+    sMri.NCS.R = Tmni(1:3,1:3);
+    sMri.NCS.T = Tmni(1:3,4);
+    % Compute default fiducials positions based on MNI coordinates
+    sMri = mri_set_default_fid(sMri);
+
+ end
+% Load SCS and NCS field to make sure that all the points were defined
+
+if ~isComputeMni && (~isfield(sMri, 'SCS') || isempty(sMri.SCS) || isempty(sMri.SCS.NAS) || isempty(sMri.SCS.LPA) || isempty(sMri.SCS.RPA) || isempty(sMri.SCS.R))
+    errorMsg = ['Could not import CIVET folder: ' 10 10 'Some fiducial points were not defined properly in the MRI.'];
+    if isInteractive
+        bst_error(errorMsg, 'Import CIVET folder', 0);
+    end
+    return;
+end
+
+%% ===== IMPORT SURFACES =====
+% Left pial
+if ~isempty(TessLhFile)
+    % Import file
+    [TessLh, nVertOrigL] = my_import_surfaces(sMri, TessLhFile, 'MNIOBJ', 0);
+   
+    % Downsample
+    bst_progress('start', 'Import CIVET folder', 'Downsampling: left pial...');
+    [TessLhLow, iLhLow, xLhLow] = my_tess_downsize(TessLh, nVertHemi, 'reducepatch');
+end
+% Right pial
+if ~isempty(TessRhFile)
+    % Import file
+    [ TessRh, nVertOrigR] = my_import_surfaces(sMri, TessRhFile, 'MNIOBJ', 0);
+    
+    % Downsample
+    bst_progress('start', 'Import CIVET folder', 'Downsampling: right pial...');
+    [TessRhLow, iRhLow, xRhLow] = my_tess_downsize(TessRh, nVertHemi, 'reducepatch');
+end
+
+% Left white matter
+if ~isempty(TessLwFile)
+    % Import file
+    [TessLw] = my_import_surfaces(sMri, TessLwFile, 'MNIOBJ', 0);
+ 
+    bst_progress('start', 'Import CIVET folder', 'Downsampling: left white...');
+    [TessLwLow, iLwLow, xLwLow] = my_tess_downsize(TessLw, nVertHemi, 'reducepatch');
+end
+% Right white matter
+if ~isempty(TessRwFile)
+    % Import file
+    [TessRw] = my_import_surfaces(sMri, TessRwFile, 'MNIOBJ', 0);
+  
+    % Downsample
+    bst_progress('start', 'Import CIVET folder', 'Downsampling: right white...');
+    [TessRwLow, iRwLow, xRwLow] = my_tess_downsize(TessRw, nVertHemi, 'reducepatch');
+end
+
+% Left mid-surface
+if ~isempty(TessLmFile)
+    % Import file
+    [TessLm] = my_import_surfaces(sMri, TessLmFile, 'MNIOBJ', 0);
+  
+    % Downsample
+    bst_progress('start', 'Import CIVET folder', 'Downsampling: left mid-surface...');
+    [TessLmLow, iLmLow, xLmLow] = my_tess_downsize(TessLm, nVertHemi, 'reducepatch');
+end
+% Right mid-surface
+if ~isempty(TessRmFile)
+    % Import file
+    [TessRm] = my_import_surfaces(sMri, TessRmFile, 'MNIOBJ', 0);
+  
+    % Downsample
+    bst_progress('start', 'Import CIVET folder', 'Downsampling: right mid-surface...');
+    [TessRmLow, iRmLow, xRmLow] = my_tess_downsize(TessRm, nVertHemi, 'reducepatch');
+end
+% Process error messages
+if ~isempty(errorMsg)
+    if isInteractive
+        bst_error(errorMsg, 'Import CIVET folder', 0);
+    end
+    return;
+end
+
+%% ===== MERGE SURFACES =====
+rmFiles = {};
+% Merge hemispheres: pial
+if ~isempty(TessLhFile) && ~isempty(TessRhFile)
+    % Hi-resolution surface
+    CortexHi  = my_tess_concatenate([TessLh,    TessRh],    sprintf('cortex_%dV', nVertOrigL + nVertOrigR), 'Cortex');
+    CortexLow = my_tess_concatenate([TessLhLow, TessRhLow], sprintf('cortex_%dV', length(xLhLow) + length(xRhLow)), 'Cortex');
+end
+
+% Merge hemispheres: white
+if ~isempty(TessLwFile) && ~isempty(TessRwFile)
+    % Hi-resolution surface
+    WhiteHi  = my_tess_concatenate([TessLw,    TessRw],    sprintf('white_%dV', nVertOrigL + nVertOrigR), 'Cortex');
+    WhiteLow = my_tess_concatenate([TessLwLow, TessRwLow], sprintf('white_%dV', length(xLwLow) + length(xRwLow)), 'Cortex');
+    % Delete separate hemispheres
+   
+end
+% Merge hemispheres: mid-surface
+if ~isempty(TessLmFile) && ~isempty(TessRmFile)
+    % Hi-resolution surface
+    MidHi  = my_tess_concatenate([TessLm,    TessRm],    sprintf('mid_%dV', nVertOrigL + nVertOrigR), 'Cortex');
+    MidLow = my_tess_concatenate([TessLmLow, TessRmLow], sprintf('mid_%dV', length(xLmLow) + length(xRmLow)), 'Cortex');
+   
+else
+    MidHiFile = [];
+    MidLowFile = [];
+end
+
+% Delete intermediary files
+
+
+%% ===== GENERATE HEAD =====
+% Generate head surface
+sHead = my_tess_isohead(sMri, 10000, 0, 2);
+
+
+%% ===== IMPORT THICKNESS MAPS =====
+if isExtraMaps && ~isempty(MidHiFile) && ~isempty(ThickLhFile) && ~isempty(ThickLhFile)
+    % Create a condition "CIVET"
+    iStudy = db_add_condition(iSubject, 'CIVET');
+    % Import cortical thickness
+    ThickFile = import_sources(iStudy, MidHiFile, ThickLhFile, ThickRhFile, 'CIVET');
+end
+
+
